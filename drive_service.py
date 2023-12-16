@@ -21,18 +21,18 @@ class DriveApiService:
         self.__scopes = scopes
         self.__root_folder = root_folder
         self.__service = None
-        self.__establish_connection()
+        self.__establishConnection()
 
     
     def getRootFolder(self) -> str:
         return self.__root_folder
 
 
-    def __establish_connection(self):
-        cred = self.__load_credentials()
+    def __establishConnection(self):
+        cred = self.__loadCredentials()
 
         if not cred or not cred.valid:
-            cred = self.__refresh_credentials(cred)
+            cred = self.__refreshCredentials(cred)
 
         try:
             self.__service = build(self.__api_name, self.__api_version, credentials=cred)
@@ -42,7 +42,7 @@ class DriveApiService:
             print('Error:', e)
 
 
-    def __load_credentials(self):
+    def __loadCredentials(self):
         pickle_file = f'token_{self.__api_name}_{self.__api_version}.pickle'
 
         if os.path.exists(pickle_file):
@@ -51,7 +51,7 @@ class DriveApiService:
         return None
 
 
-    def __refresh_credentials(self, cred):
+    def __refreshCredentials(self, cred):
         if cred and cred.expired and cred.refresh_token:
             cred.refresh(Request())
         else:
@@ -63,7 +63,7 @@ class DriveApiService:
         return cred
 
 
-    def create_folders(self, folders: List[str], parent_id: str = None):
+    def createFolders(self, folders: List[str], parent_id: str = None):
         try:
             responses = []
             for folder in folders:
@@ -84,7 +84,7 @@ class DriveApiService:
 
 
 
-    def check_folder_exists(self, folder_name: str, parent_id: str = None) -> bool:
+    def checkFolderExists(self, folder_name: str, parent_id: str = None) -> bool:
         query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
         
         if parent_id:
@@ -100,7 +100,7 @@ class DriveApiService:
 
     
     
-    def __create_nested_zip(self, metadata: dict) -> BytesIO:
+    def __createZipBuf(self, metadata: dict) -> BytesIO:
         # Create BytesIO buffers to hold the images
         watermarked_image_buf = BytesIO()
         key_image_buf = BytesIO()
@@ -117,77 +117,89 @@ class DriveApiService:
         block_position_buf.seek(0)
 
         # Create a BytesIO buffer for the nested zip file
-        nested_zip_buf = BytesIO()
+        zip_buf = BytesIO()
 
         # Create a zip file for the nested zip and add the BMP and PNG images to it
-        with zipfile.ZipFile(nested_zip_buf, 'w', zipfile.ZIP_STORED) as nested_zip:
-            nested_zip.writestr('image1.bmp', watermarked_image_buf.getvalue())
-            nested_zip.writestr('image2.bmp', key_image_buf.getvalue())
-            nested_zip.writestr('image3.bmp', block_position_buf.getvalue())
+        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_STORED) as nested_zip:
+            nested_zip.writestr(f'{metadata['file1']['file_name']}.bmp', watermarked_image_buf.getvalue())
+            nested_zip.writestr(f'{metadata['file2']['file_name']}.bmp', key_image_buf.getvalue())
+            nested_zip.writestr(f'{metadata['file3']['file_name']}.bmp', block_position_buf.getvalue())
 
         # Reset buffer position to start
-        nested_zip_buf.seek(0)
-        return nested_zip_buf
+        zip_buf.seek(0)
+        return zip_buf
     
 
-    def __upload_single_image(self, parent_id: str, output_name: str, image_array: np.ndarray):
-        print(f'[SYSTEM] Uploading image \'{output_name}\' to google drive')
+    def __uploadSingleImage(self, parent_id: str, output_name: str, image_array: np.ndarray, email: str = None):
+        print(f'[SYSTEM] Uploading image \'{output_name}\' to Google Drive')
         try:
             with tempfile.NamedTemporaryFile(suffix='.bmp', delete=False) as image_temp:
                 Image.fromarray(np.uint8(image_array)).save(image_temp, format='bmp')
                 image_temp.seek(0)
                 media = MediaFileUpload(image_temp.name, mimetype='image/bmp', resumable=True)
                 file_metadata = {'name': f'{output_name}.bmp', 'parents': [parent_id]}
-                return self.__service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        except Exception as e:
-            print("[SYSTEM] Failed when upload single image")
-            print('Error:', e)
-        
+                uploaded_file = self.__service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-    def __upload_zip(self, parent_id: str, watermarked_image: np.ndarray, key_image: np.ndarray, block_position: np.ndarray):
-        print(f'[SYSTEM] Uploading zip to google drive')
+                # Share the file with the specified email
+                if email:
+                    permission = {
+                        'type': 'user',
+                        'role': 'reader',
+                        'emailAddress': email
+                    }
+                    self.__service.permissions().create(fileId=uploaded_file['id'], body=permission).execute()
+                
+                print('[SYSTEM] File uploaded successfully')
+                return uploaded_file
+        except Exception as e:
+            print("[SYSTEM] Failed when uploading single image")
+            print('Error:', e)
+
+    def __uploadZip(self, parent_id: str, watermarked_image: np.ndarray, key_image: np.ndarray, block_position: np.ndarray, email: str = None):
+        print(f'[SYSTEM] Uploading zip to Google Drive')
         try:
             metadata = {
-                'file1': {
-                    'file_name':'watermarked_image',
-                    'image':watermarked_image
-                },
-                'file2': {
-                    'file_name':'key_image',
-                    'image':key_image
-                },
-                'file3': {
-                    'file_name':'block_position',
-                    'image':block_position
-                }
-                
+                'file1': {'file_name':'watermarked_image', 'image':watermarked_image},
+                'file2': {'file_name':'key_image', 'image':key_image},
+                'file3': {'file_name':'block_position', 'image':block_position}
             }
             # Create nested zip containing 3 images
-            nested_zip_buf = self.__create_nested_zip(metadata=metadata)
+            zip_buf = self.__createZipBuf(metadata=metadata)
             # Reset nested zip buffer position to start
-            nested_zip_buf.seek(0)
+            zip_buf.seek(0)
             
-
             with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as zip_temp:
-                zip_temp.write(nested_zip_buf.getvalue())
+                zip_temp.write(zip_buf.getvalue())
                 zip_temp.seek(0)
                 media4 = MediaFileUpload(zip_temp.name, mimetype='application/zip', resumable=True)
                 file4_metadata = {'name': 'embedding.zip', 'parents': [parent_id]}
-                return self.__service.files().create(body=file4_metadata, media_body=media4, fields='id').execute()
+                uploaded_file = self.__service.files().create(body=file4_metadata, media_body=media4, fields='id').execute()
+
+                # Share the file with the specified email
+                if email:
+                    permission = {
+                        'type': 'user',
+                        'role': 'reader',
+                        'emailAddress': email
+                    }
+                    self.__service.permissions().create(fileId=uploaded_file['id'], body=permission).execute()
+
+                print('[SYSTEM] File uploaded successfully')
+                return uploaded_file
         except Exception as e:
-            print("[SYSTEM] Failed when upload a zip file")
+            print("[SYSTEM] Failed when uploading a zip file")
             print('Error:', e)
             
 
-    def upload_mixed_files(self, parent_id: str, watermarked_image: np.ndarray, key_image: np.ndarray, block_position: np.ndarray):
+    def uploadMixedFiles(self, parent_id: str, watermarked_image: np.ndarray, key_image: np.ndarray, block_position: np.ndarray, email: str):
         try:
             responses = {}
 
-            responses['watermarked_image'] = self.__upload_single_image(parent_id=parent_id, output_name='watermarked_image', image_array=watermarked_image.copy())
-            responses['key_image'] = self.__upload_single_image(parent_id=parent_id, output_name='key_image', image_array=watermarked_image.copy())
-            responses['block_position'] = self.__upload_single_image(parent_id=parent_id, output_name='block_position', image_array=watermarked_image.copy())
+            responses['watermarked_image'] = self.__uploadSingleImage(parent_id=parent_id, output_name='watermarked_image', image_array=watermarked_image.copy(), email=email)
+            responses['key_image'] = self.__uploadSingleImage(parent_id=parent_id, output_name='key_image', image_array=key_image.copy(), email=email)
+            responses['block_position'] = self.__uploadSingleImage(parent_id=parent_id, output_name='block_position', image_array=block_position.copy(), email=email)
 
-            responses['embedding_result_zip'] = self.__upload_zip(parent_id=parent_id, watermarked_image=watermarked_image.copy(), key_image=key_image.copy(), block_position=block_position.copy())
+            responses['embedding_result_zip'] = self.__uploadZip(parent_id=parent_id, watermarked_image=watermarked_image.copy(), key_image=key_image.copy(), block_position=block_position.copy(), email=email)
 
             print("Uploaded all files successfully")
 
@@ -196,5 +208,34 @@ class DriveApiService:
             print("[SYSTEM] Failed to upload mixed files")
             print('Error:', e)
 
+
+    def getFileLinks(self, file_id: str):
+        try:
+            # Retrieve file metadata including webViewLink and downloadUrl
+            file = self.__service.files().get(fileId=file_id, fields='webViewLink, webContentLink').execute()
+
+            # Extract links
+            web_view_link = file.get('webViewLink')
+            download_link = file.get('webContentLink')
+
+            return web_view_link, download_link
+        except Exception as e:
+            print("[SYSTEM] Failed to retrieve file links")
+            print('Error:', e)
         
+    
+    def getFilesInFolder(self, folder_id: str):
+        try:
+            # Query to retrieve all files in the folder
+            query = f"'{folder_id}' in parents and trashed=false"
+            
+            response = self.__service.files().list(q=query, fields='files(id, name)').execute()
+            
+            files_in_folder = response.get('files', [])
+                        
+            return files_in_folder
+        except Exception as e:
+            print("[SYSTEM] Failed to retrieve files in folder")
+            print('Error:', e)
+            return []
 
